@@ -75,7 +75,7 @@ export class JumpCounter {
     this.passes++;
     if (!this.ropeMode) return 0;
     if (this.pending && t <= this.pending.deadline) this.pending = null;
-    if (this.rejected != null && t - this.rejected <= 120) {
+    if (this.rejected != null && t - this.rejected <= 80) {
       const rt = this.rejected;
       this.rejected = null;
       this._add(rt);
@@ -88,7 +88,7 @@ export class JumpCounter {
 
   // 每帧调用：处理超时撤回。返回 -1 表示撤回了一个。
   tick(t) {
-    if (this.rejected != null && t - this.rejected > 120) this.rejected = null;
+    if (this.rejected != null && t - this.rejected > 80) this.rejected = null;
     if (this.pending && t > this.pending.deadline) {
       const i = this.times.lastIndexOf(this.pending.t);
       if (i >= 0) { this.times.splice(i, 1); this.count--; }
@@ -151,4 +151,27 @@ export class JumpCounter {
     }
     return { ok: true, counted, hop, d, hi, lo };
   }
+}
+
+// 头顶横带的帧差特征。g/prev：灰度图（dw×dh），c0..c1：看绳子的列范围，其余（留 5% 边距）当对照。
+export function ropeFeatures(g, prev, dw, dh, c0, c1) {
+  const zone = c1 - c0, n = dw * dh;
+  const margin = Math.round(0.05 * dw);
+  let ch = 0, side = 0, sideN = 0, covered = 0, sumN = 0, run = 0, best = 0, gap = 0;
+  for (let x = 0; x < dw; x++) {
+    let nc = 0;
+    for (let y = 0; y < dh; y++) { const k = y * dw + x; if (Math.abs(g[k] - prev[k]) > 18) nc++; }
+    if (x >= c0 && x < c1) {
+      ch += nc;
+      if (nc > 0) { covered++; sumN += nc; run += 1 + gap; gap = 0; if (run > best) best = run; }
+      else if (run > 0 && gap < 2) gap++;
+      else { run = 0; gap = 0; }
+    } else if (x < c0 - margin || x >= c1 + margin) { side += nc; sideN += dh; }
+  }
+  return {
+    e: ch / (zone * dh),
+    eSide: sideN > 0.1 * n ? side / sideN : null,
+    lineLen: best / zone,                          // 最长连续变化的宽度占比：绳子是一条横线
+    thick: covered ? sumN / covered / dh : 1,      // 每列变化厚度占比：绳子细，晃动/光线变化是整片
+  };
 }

@@ -1,5 +1,5 @@
 import { FilesetResolver, PoseLandmarker } from './lib/vision_bundle.mjs';
-import { JumpCounter } from './counter.mjs';
+import { JumpCounter, ropeFeatures } from './counter.mjs';
 
 const $ = id => document.getElementById(id);
 const video = $('cam'), overlay = $('overlay'), ctx = overlay.getContext('2d');
@@ -146,7 +146,7 @@ const ropeCv = document.createElement('canvas');
 const rctx = ropeCv.getContext('2d', { willReadFrequently: true });
 const rope = { box: null, prev: null, e: 0, bg: 0.002, last: -1e9, above: false, headTop: null, torso: null, room: 1 };
 
-function ropeReset() { rope.box = null; rope.prev = null; rope.bg = 0.002; rope.last = -1e9; rope.above = false; rope.headTop = null; rope.torso = null; }
+function ropeReset() { rope.key = null; rope.skip = 0; rope.box = null; rope.prev = null; rope.bg = 0.002; rope.last = -1e9; rope.above = false; rope.headTop = null; rope.torso = null; }
 const sens = () => +$('sens').value;
 
 function ropeStep(lm, t) {
@@ -162,39 +162,44 @@ function ropeStep(lm, t) {
   const bottom = rope.headTop - 0.35 * rope.torso;
   const top = Math.max(0, bottom - 0.9 * rope.torso);
   rope.room = (bottom - top) / (0.9 * rope.torso);          // 头顶上方空间够不够（1 = 够）
+  if (bottom - top < 0.2 * rope.torso) { rope.prev = null; return null; }
+
+  // 取整条横带（整幅宽），中间是看绳子的区域，两边当对照：两边也在变 = 手机晃 / 光线变
   const cx = (lm[11].x + lm[12].x) / 2;
   const half = Math.max(0.9 * rope.torso * H / W, 1.4 * Math.abs(lm[11].x - lm[12].x));
-  const x0 = Math.max(0, cx - half), x1 = Math.min(1, cx + half);
-  const box = { x: Math.round(x0 * W), y: Math.round(top * H), w: Math.round((x1 - x0) * W), h: Math.round((bottom - top) * H) };
-  if (box.w < 20 || box.h < 8) { rope.prev = null; return null; }
-  // 区域明显移动了才换，换的时候丢掉上一帧
-  const ob = rope.box;
-  if (!ob || Math.abs(ob.x - box.x) > 6 || Math.abs(ob.y - box.y) > 6 || Math.abs(ob.w - box.w) > 10 || Math.abs(ob.h - box.h) > 10) { rope.box = box; rope.prev = null; }
-  const b = rope.box;
-  const sc = Math.min(1, 200 / b.w);
-  const dw = Math.max(8, Math.round(b.w * sc)), dh = Math.max(4, Math.round(b.h * sc));
+  const sc = Math.min(1, 240 / W);
+  const dw = Math.round(W * sc);
+  const yTop = Math.round(top * H), yH = Math.max(4, Math.round((bottom - top) * H));
+  const dh = Math.max(4, Math.round(yH * sc));
+  const key = yTop + ':' + yH;
+  if (rope.key == null || Math.abs(rope.keyTop - yTop) > 6 || Math.abs(rope.keyH - yH) > 10) {
+    rope.key = key; rope.keyTop = yTop; rope.keyH = yH; rope.prev = null;
+  }
   if (ropeCv.width !== dw || ropeCv.height !== dh) { ropeCv.width = dw; ropeCv.height = dh; rope.prev = null; }
-  rctx.drawImage(video, b.x, b.y, b.w, b.h, 0, 0, dw, dh);
+  rctx.drawImage(video, 0, rope.keyTop, W, rope.keyH, 0, 0, dw, dh);
   const px = rctx.getImageData(0, 0, dw, dh).data;
   const n = dw * dh, g = new Uint8Array(n);
   for (let i = 0, j = 0; i < n; i++, j += 4) g[i] = (px[j] + 2 * px[j + 1] + px[j + 2]) >> 2;
-  // 手举过头顶时这一帧不看
-  const handsUp = (vis(15) && lm[15].y < bottom) || (vis(16) && lm[16].y < bottom);
-  let e = 0;
-  if (rope.prev && !handsUp) {
-    let c = 0;
-    for (let i = 0; i < n; i++) if (Math.abs(g[i] - rope.prev[i]) > 18) c++;
-    e = c / n;
-  }
+
+  // 不看的帧：手（腕、肘）举过区域、头跳得太高快碰到区域
+  const handsUp = [13, 14, 15, 16].some(i => vis(i) && lm[i].y < bottom + 0.05 * rope.torso);
+  const headHigh = headTop < bottom + 0.15 * rope.torso;
+  const prev = rope.prev;
   rope.prev = g;
+  if (handsUp || headHigh) rope.skip = 2;
+  if (!prev || rope.skip > 0) { rope.skip = Math.max(0, (rope.skip || 0) - 1); rope.above = false; return { pass: false, e: 0, th: 1 }; }
+
+  const c0 = Math.max(0, Math.round((cx - half) * dw)), c1 = Math.min(dw, Math.round((cx + half) * dw));
+  const zone = c1 - c0;
+  const { e, eSide, lineLen, thick } = ropeFeatures(g, prev, dw, dh, c0, c1);
   rope.e = e;
-  // 背景变化水平（慢）+ 尖峰检测
-  const th = Math.max(0.012 / sens(), 4 * rope.bg);
+  const th = Math.max(0.01 / sens(), 4 * rope.bg);
+  const cand = e > th && lineLen >= 0.4 && thick <= 0.4 && (eSide == null || eSide < 0.3 * e);
   let pass = false;
-  if (!rope.above && e > th && t - rope.last > 140) { rope.above = true; rope.last = t; pass = true; }
-  else if (rope.above && e < th * 0.5) rope.above = false;
-  if (!rope.above) rope.bg += 0.03 * (Math.min(e, 2 * rope.bg + 0.001) - rope.bg);
-  return { pass, e, th };
+  if (cand && !rope.above && t - rope.last > 140) { rope.above = true; rope.last = t; pass = true; }
+  else if (!cand) rope.above = false;
+  if (!cand) rope.bg += 0.03 * (Math.min(e, 2 * rope.bg + 0.001) - rope.bg);
+  return { pass, e: cand ? e : Math.min(e, th * 0.9), th };
 }
 
 // ---------- 识别循环 ----------
