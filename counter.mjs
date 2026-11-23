@@ -160,7 +160,7 @@ export function ropeFeatures(g, prev, dw, dh, c0, c1) {
   let ch = 0, side = 0, sideN = 0, covered = 0, sumN = 0, run = 0, best = 0, gap = 0;
   for (let x = 0; x < dw; x++) {
     let nc = 0;
-    for (let y = 0; y < dh; y++) { const k = y * dw + x; if (Math.abs(g[k] - prev[k]) > 18) nc++; }
+    for (let y = 0; y < dh; y++) { const k = y * dw + x; if (Math.abs(g[k] - prev[k]) > 14) nc++; }
     if (x >= c0 && x < c1) {
       ch += nc;
       if (nc > 0) { covered++; sumN += nc; run += 1 + gap; gap = 0; if (run > best) best = run; }

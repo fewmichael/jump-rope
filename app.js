@@ -16,7 +16,8 @@ let phase = 'idle';             // idle | countdown | running | done
 let modeSec = 60;
 let runStart = 0, runEnd = 0;
 let recorder = null, recChunks = [], recStart = 0, replayURL = null, fileURL = null;
-let replayTimes = [];           // 每次计数在录像里的秒数
+let replayTimes = [];
+let replayBlob = null;           // 每次计数在录像里的秒数
 let autoCount = 0, finalCount = 0;
 let lastDetectTs = 0, frames = 0, fpsT = performance.now(), fps = 0;
 let waveBuf = [];
@@ -167,7 +168,7 @@ function ropeStep(lm, t) {
   // 取整条横带（整幅宽），中间是看绳子的区域，两边当对照：两边也在变 = 手机晃 / 光线变
   const cx = (lm[11].x + lm[12].x) / 2;
   const half = Math.max(0.9 * rope.torso * H / W, 1.4 * Math.abs(lm[11].x - lm[12].x));
-  const sc = Math.min(1, 240 / W);
+  const sc = Math.min(1, 480 / W);
   const dw = Math.round(W * sc);
   const yTop = Math.round(top * H), yH = Math.max(4, Math.round((bottom - top) * H));
   const dh = Math.max(4, Math.round(yH * sc));
@@ -193,10 +194,11 @@ function ropeStep(lm, t) {
   const zone = c1 - c0;
   const { e, eSide, lineLen, thick } = ropeFeatures(g, prev, dw, dh, c0, c1);
   rope.e = e;
-  const th = Math.max(0.01 / sens(), 4 * rope.bg);
-  const cand = e > th && lineLen >= 0.4 && thick <= 0.4 && (eSide == null || eSide < 0.3 * e);
+  rope.zone = { x0: c0 / dw, x1: c1 / dw, y0: rope.keyTop / H, y1: (rope.keyTop + rope.keyH) / H, flash: rope.zone && t - rope.last < 200 };
+  const th = Math.max(0.006 / sens(), 4 * rope.bg);
+  const cand = e > th && lineLen >= 0.3 && thick <= 0.45 && (eSide == null || eSide < 0.3 * e);
   let pass = false;
-  if (cand && !rope.above && t - rope.last > 140) { rope.above = true; rope.last = t; pass = true; }
+  if (cand && !rope.above && t - rope.last > 140) { rope.above = true; rope.last = t; pass = true; ropeFlashAt = performance.now(); }
   else if (!cand) rope.above = false;
   if (!cand) rope.bg += 0.03 * (Math.min(e, 2 * rope.bg + 0.001) - rope.bg);
   return { pass, e: cand ? e : Math.min(e, th * 0.9), th };
@@ -252,7 +254,18 @@ function draw(lm) {
     ctx.moveTo(lm[a].x * W, lm[a].y * H); ctx.lineTo(lm[b].x * W, lm[b].y * H);
   }
   ctx.stroke();
+  // 看绳子的框（蓝色虚线）：绳子要从这个框里横着扫过；认到一次框会闪一下
+  const z = rope.zone;
+  if (counter.ropeMode && z) {
+    const flash = performance.now() - ropeFlashAt < 180;
+    ctx.setLineDash([W / 60, W / 90]); ctx.lineWidth = Math.max(2, W / 200);
+    ctx.strokeStyle = 'rgba(90,169,255,.9)';
+    ctx.strokeRect(z.x0 * W, z.y0 * H, (z.x1 - z.x0) * W, (z.y1 - z.y0) * H);
+    ctx.setLineDash([]);
+    if (flash) { ctx.fillStyle = 'rgba(90,169,255,.35)'; ctx.fillRect(z.x0 * W, z.y0 * H, (z.x1 - z.x0) * W, (z.y1 - z.y0) * H); }
+  }
 }
+let ropeFlashAt = -1e9;
 
 let lastStatus = '';
 function setStatus(lm) {
@@ -379,7 +392,8 @@ function finish() {
   $('result').hidden = false;
   const done = () => {
     if (replayURL && replayURL !== fileURL) URL.revokeObjectURL(replayURL);
-    replayURL = source === 'file' ? fileURL : (recChunks.length ? URL.createObjectURL(new Blob(recChunks, { type: recorder?.mimeType || 'video/webm' })) : null);
+    replayBlob = source === 'file' || !recChunks.length ? null : new Blob(recChunks, { type: recorder?.mimeType || 'video/webm' });
+    replayURL = source === 'file' ? fileURL : (replayBlob ? URL.createObjectURL(replayBlob) : null);
     $('openReplay').hidden = !replayURL;
   };
   if (recorder && recorder.state !== 'inactive') { recorder.onstop = done; recorder.stop(); } else done();
@@ -401,12 +415,7 @@ const rv = $('rv'), rvCount = $('rvCount');
 $('openReplay').onclick = () => {
   if (!replayURL) return;
   rv.src = replayURL; rv.playbackRate = 0.5;
-  const dl = $('dl');
-  const ext = (recorder?.mimeType || '').includes('mp4') ? 'mp4' : 'webm';
-  const d = new Date(), pad = x => String(x).padStart(2, '0');
-  dl.href = replayURL;
-  dl.download = `跳绳_${d.getMonth() + 1}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}_程序${autoCount}.${ext}`;
-  dl.hidden = source === 'file';
+  $('dl').hidden = source === 'file' || !replayBlob;
   $('replay').hidden = false; rv.play().catch(() => {});
   $('replay').scrollIntoView({ behavior: 'smooth' });
   replayLoop();
@@ -424,6 +433,22 @@ function replayLoop() {
   }
   requestAnimationFrame(replayLoop);
 }
+
+$('dl').onclick = async () => {
+  if (!replayBlob) return;
+  const ext = replayBlob.type.includes('mp4') ? 'mp4' : 'webm';
+  const d = new Date(), pad = x => String(x).padStart(2, '0');
+  const name = `jump_${d.getMonth() + 1}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}_auto${autoCount}.${ext}`;
+  const file = new File([replayBlob], name, { type: replayBlob.type });
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try { await navigator.share({ files: [file], title: '跳绳录像' }); return; }
+    catch (e) { if (e.name === 'AbortError') return; }
+  }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(file); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  $('dlTip').hidden = false;
+};
 
 // ---------- 分析已有视频 ----------
 $('file').onchange = async e => {
