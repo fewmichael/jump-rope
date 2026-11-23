@@ -401,6 +401,12 @@ const rv = $('rv'), rvCount = $('rvCount');
 $('openReplay').onclick = () => {
   if (!replayURL) return;
   rv.src = replayURL; rv.playbackRate = 0.5;
+  const dl = $('dl');
+  const ext = (recorder?.mimeType || '').includes('mp4') ? 'mp4' : 'webm';
+  const d = new Date(), pad = x => String(x).padStart(2, '0');
+  dl.href = replayURL;
+  dl.download = `跳绳_${d.getMonth() + 1}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}_程序${autoCount}.${ext}`;
+  dl.hidden = source === 'file';
   $('replay').hidden = false; rv.play().catch(() => {});
   $('replay').scrollIntoView({ behavior: 'smooth' });
   replayLoop();
