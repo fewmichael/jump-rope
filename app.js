@@ -49,14 +49,62 @@ $('rec').onchange = e => store.set('jr-rec', e.target.checked);
 $('ropeMode').onchange = e => { store.set('jr-rope', e.target.checked); if (phase !== 'running') counter.ropeMode = e.target.checked; };
 
 // ---------- 模型 ----------
+// 模型文件约 15MB。自己下载并显示进度；本站卡住超过 12 秒就换镜像。
+const MIRRORS = ['./lib/', 'https://cdn.jsdelivr.net/gh/fewmichael/jump-rope@main/lib/'];
+const NPM = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/';
+
+async function fetchProgress(urls, onProg) {
+  let lastErr;
+  for (const url of urls) {
+    const ctrl = new AbortController();
+    let timer;
+    const arm = () => { clearTimeout(timer); timer = setTimeout(() => ctrl.abort(), 12000); };
+    try {
+      arm();
+      const res = await fetch(url, { signal: ctrl.signal });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const reader = res.body.getReader();
+      const chunks = [];
+      let got = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value); got += value.length; arm(); onProg(got);
+      }
+      clearTimeout(timer);
+      return new Blob(chunks);
+    } catch (e) { clearTimeout(timer); lastErr = e; onProg(0); }
+  }
+  throw lastErr || new Error('下载失败');
+}
+
 async function loadModel() {
-  const fileset = await FilesetResolver.forVisionTasks('./lib/wasm');
+  const simd = await FilesetResolver.isSimdSupported().catch(() => true);
+  const w = simd ? 'vision_wasm_internal' : 'vision_wasm_nosimd_internal';
+  const files = [
+    { urls: MIRRORS.map(m => m + 'wasm/' + w + '.js').concat(NPM + 'wasm/' + w + '.js'), size: 0.21e6, type: 'text/javascript' },
+    { urls: MIRRORS.map(m => m + 'wasm/' + w + '.wasm').concat(NPM + 'wasm/' + w + '.wasm'), size: 9.4e6, type: 'application/wasm' },
+    { urls: MIRRORS.map(m => m + 'pose_landmarker_lite.task'), size: 5.78e6, type: 'application/octet-stream' },
+  ];
+  const total = files.reduce((a, f) => a + f.size, 0);
+  const got = files.map(() => 0);
+  const show = () => {
+    const pct = Math.min(99, Math.round(got.reduce((a, b) => a + b, 0) / total * 100));
+    statusEl.textContent = `下载识别模型 ${pct}%（只有第一次要下载）`;
+  };
+  show();
+  const blobs = await Promise.all(files.map((f, k) => fetchProgress(f.urls, n => { got[k] = n; show(); })
+    .then(b => new Blob([b], { type: f.type }))));
+  statusEl.textContent = '正在启动识别…';
+  const fileset = { wasmLoaderPath: URL.createObjectURL(blobs[0]), wasmBinaryPath: URL.createObjectURL(blobs[1]) };
+  const model = new Uint8Array(await blobs[2].arrayBuffer());
   const opts = delegate => ({
-    baseOptions: { modelAssetPath: './lib/pose_landmarker_lite.task', delegate },
+    baseOptions: { modelAssetBuffer: model, delegate },
     runningMode: 'VIDEO', numPoses: 1,
     minPoseDetectionConfidence: 0.5, minPosePresenceConfidence: 0.5, minTrackingConfidence: 0.5,
   });
-  try { landmarker = await PoseLandmarker.createFromOptions(fileset, opts('GPU')); }
+  const timeout = ms => new Promise((_, rej) => setTimeout(() => rej(new Error('GPU 启动超时')), ms));
+  try { landmarker = await Promise.race([PoseLandmarker.createFromOptions(fileset, opts('GPU')), timeout(10000)]); }
   catch { landmarker = await PoseLandmarker.createFromOptions(fileset, opts('CPU')); }
 }
 
@@ -409,11 +457,14 @@ function showErr(m) { errEl.textContent = m; errEl.hidden = false; }
 
 // ---------- 启动 ----------
 renderHistory(); showTimer(0);
+window.addEventListener('error', e => showErr('出错了：' + (e.message || e.error)));
+window.addEventListener('unhandledrejection', e => showErr('出错了：' + (e.reason && e.reason.message || e.reason)));
 (async () => {
-  try { await loadModel(); }
-  catch (e) { showErr('识别模型加载失败：' + e.message); statusEl.textContent = '模型加载失败'; return; }
-  statusEl.textContent = '模型就绪';
-  await startCamera();
-  startBtn.disabled = false;
+  const cam = startCamera();            // 先开摄像头，模型边下边等
   loop();
+  try { await loadModel(); }
+  catch (e) { showErr('识别模型加载失败：' + (e.message || e) + '。请检查网络后刷新；在微信里打不开的话，点右上角「…」选「在浏览器打开」。'); statusEl.textContent = '模型加载失败'; return; }
+  statusEl.textContent = '模型就绪';
+  await cam;
+  startBtn.disabled = false;
 })();
