@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0f1420">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>跳绳计数</title>
+<style>
+  /* 运动计分板：深底、大号等宽数字、一个亮橙强调色 */
+  :root {
+    --bg: #0f1420; --panel: #182033; --line: #2a3550; --fg: #eef2fa; --dim: #8e9ab3;
+    --accent: #ff8a1f; --rope: #5aa9ff; --good: #3ccf8e; --warn: #ffcc4d; --bad: #ff5c6c;
+    --num: "SF Mono", "Roboto Mono", "Consolas", ui-monospace, monospace;
+    --ui: -apple-system, "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--ui); }
+  body { padding: env(safe-area-inset-top, 0px) max(16px, env(safe-area-inset-right, 0px)) calc(24px + env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px)); }
+  .wrap { max-width: 720px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
+  header { display: flex; align-items: baseline; justify-content: space-between; padding-top: 12px; }
+  h1 { font-size: 20px; margin: 0; letter-spacing: .04em; }
+  h2 { font-size: 16px; margin: 0 0 10px; }
+  .fps { font: 12px var(--num); color: var(--dim); }
+  .fps.low { color: var(--warn); }
+
+  .stage { position: relative; margin: 0 auto; background: #000; border-radius: 14px; overflow: hidden; width: 100%; aspect-ratio: 3 / 4; max-height: 64vh; }
+  .stage video, .stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+  .mirror video, .mirror canvas { transform: scaleX(-1); }
+  .hud { position: absolute; inset: 0; pointer-events: none; display: flex; flex-direction: column; justify-content: space-between; padding: 10px 12px; }
+  .hud-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .timer { font: 700 22px var(--num); background: rgba(0,0,0,.55); padding: 2px 10px; border-radius: 8px; font-variant-numeric: tabular-nums; }
+  .status { font-size: 13px; background: rgba(0,0,0,.55); padding: 4px 10px; border-radius: 8px; }
+  .status.ok { color: var(--good); } .status.bad { color: var(--warn); }
+  .count { align-self: center; font: 800 min(30vw, 150px)/1 var(--num); color: #fff; text-shadow: 0 4px 24px rgba(0,0,0,.7); font-variant-numeric: tabular-nums; transition: transform .08s; }
+  .count.bump { transform: scale(1.08); color: var(--accent); }
+  .sub { align-self: center; font: 600 14px var(--ui); background: rgba(0,0,0,.55); padding: 3px 10px; border-radius: 8px; }
+  .sub:empty { display: none; }
+  .legend { display: flex; gap: 14px; font-size: 12px; color: var(--dim); margin-top: -8px; flex-wrap: wrap; }
+  .legend i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
+  .legend i.sq { border-radius: 0; width: 3px; height: 10px; }
+  .countdown { position: absolute; inset: 0; display: grid; place-items: center; font: 800 140px var(--num); color: var(--accent); background: rgba(0,0,0,.45); }
+
+  .wave { width: 100%; height: 70px; background: var(--panel); border-radius: 10px; display: block; }
+  .controls { display: flex; flex-direction: column; gap: 12px; }
+  .seg { display: grid; grid-template-columns: repeat(3, 1fr); background: var(--panel); border-radius: 12px; padding: 4px; gap: 4px; }
+  .seg button { border: 0; background: transparent; color: var(--dim); padding: 10px 0; border-radius: 9px; font: 600 15px var(--ui); }
+  .seg button[aria-checked="true"] { background: var(--line); color: var(--fg); }
+  .go { border: 0; border-radius: 14px; padding: 18px; font: 800 22px var(--ui); letter-spacing: .2em; background: var(--accent); color: #1a0e00; }
+  .go.stop { background: var(--bad); color: #fff; }
+  .go:disabled { opacity: .4; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  .row > * { flex: 1 1 auto; }
+  .btn { border: 1px solid var(--line); background: var(--panel); color: var(--fg); border-radius: 10px; padding: 10px 12px; font: 14px var(--ui); text-align: center; cursor: pointer; }
+  .chk { display: flex; gap: 6px; align-items: center; font-size: 14px; color: var(--dim); }
+  .sens { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--dim); }
+  .sens input { flex: 1; accent-color: var(--accent); }
+  button:focus-visible, input:focus-visible, .btn:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .card { background: var(--panel); border-radius: 14px; padding: 14px; }
+  .result-num { font: 800 64px/1 var(--num); color: var(--accent); }
+  .result-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .adj { display: flex; gap: 6px; }
+  .adj button { width: 44px; height: 40px; font-size: 18px; }
+  .meta { color: var(--dim); font-size: 13px; margin-top: 6px; }
+  .replay-stage { position: relative; background: #000; border-radius: 10px; overflow: hidden; }
+  .replay-stage video { width: 100%; display: block; max-height: 60vh; }
+  .replay-count { position: absolute; right: 10px; top: 8px; font: 800 48px var(--num); text-shadow: 0 2px 12px #000; }
+  .replay-count.flash { color: var(--accent); }
+  .hist { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 6px; font-size: 14px; }
+  .hist li { display: flex; justify-content: space-between; gap: 10px; border-bottom: 1px solid var(--line); padding: 6px 0; }
+  .hist b { font-family: var(--num); color: var(--fg); }
+  .hist .when { color: var(--dim); }
+  .tips ul { margin: 0; padding-left: 18px; color: var(--dim); font-size: 14px; line-height: 1.7; }
+  .err { color: var(--bad); font-size: 14px; }
+  @media (prefers-reduced-motion: reduce) { .count { transition: none; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header><h1>跳绳计数</h1><span id="fps" class="fps"></span></header>
+
+  <section id="stage" class="stage mirror">
+    <video id="cam" playsinline muted autoplay></video>
+    <canvas id="overlay"></canvas>
+    <div class="hud">
+      <div class="hud-top"><span id="timer" class="timer">0:00</span><span id="status" class="status">正在加载识别模型…</span></div>
+      <div id="count" class="count">0</div>
+      <div id="sub" class="sub"></div>
+    </div>
+    <div id="countdown" class="countdown" hidden>3</div>
+  </section>
+
+  <canvas id="wave" class="wave" aria-label="身体起伏和绳子信号"></canvas>
+  <div class="legend"><span><i style="background:var(--accent)"></i>算数的跳</span><span><i style="background:var(--dim)"></i>蹦了但绳子没过，不算</span><span><i class="sq" style="background:var(--rope)"></i>绳子过头顶</span></div>
+
+  <section class="controls">
+    <div id="mode" class="seg" role="radiogroup" aria-label="模式">
+      <button role="radio" data-sec="0" aria-checked="false">自由计数</button>
+      <button role="radio" data-sec="30" aria-checked="false">30 秒</button>
+      <button role="radio" data-sec="60" aria-checked="true">1 分钟</button>
+    </div>
+    <button id="startBtn" class="go" disabled>开始</button>
+    <label class="sens">灵敏度 <span>低</span><input id="sens" type="range" min="0.6" max="1.6" step="0.1" value="1"><span>高</span></label>
+    <div class="row">
+      <label class="chk"><input id="beep" type="checkbox" checked> 每跳提示音</label>
+      <label class="chk"><input id="rec" type="checkbox" checked> 录像核对</label>
+      <label class="chk"><input id="ropeMode" type="checkbox" checked> 看绳子（绳子过了才算）</label>
+    </div>
+    <div class="row">
+      <button id="flip" class="btn">切换前后摄像头</button>
+      <label class="btn">分析已有视频<input id="file" type="file" accept="video/*" hidden></label>
+    </div>
+    <p id="err" class="err" hidden></p>
+  </section>
+
+  <section id="result" class="card" hidden>
+    <h2>本次成绩</h2>
+    <div class="result-row">
+      <span id="resNum" class="result-num">0</span>
+      <div class="adj"><button id="minus" class="btn" aria-label="减一">−</button><button id="plus" class="btn" aria-label="加一">＋</button></div>
+      <button id="save" class="btn">保存</button>
+      <button id="openReplay" class="btn">回放核对</button>
+    </div>
+    <div id="resMeta" class="meta"></div>
+  </section>
+
+  <section id="replay" class="card" hidden>
+    <h2>回放核对</h2>
+    <div class="replay-stage"><video id="rv" playsinline controls></video><span id="rvCount" class="replay-count">0</span></div>
+    <div class="row" style="margin-top:10px">
+      <button class="btn" data-rate="0.25">0.25 倍</button>
+      <button class="btn" data-rate="0.5">0.5 倍</button>
+      <button class="btn" data-rate="1">原速</button>
+    </div>
+    <p class="meta">慢放时每数一下右上角的数字会变橙。漏数或多数了，用上面的 − ＋ 改成绩，并告诉我是在什么情况下错的。</p>
+  </section>
+
+  <section class="card">
+    <h2>记录</h2>
+    <ol id="history" class="hist"></ol>
+    <p id="histEmpty" class="meta">还没有记录。跳完点「保存」就会出现在这里。</p>
+  </section>
+
+  <section class="card tips">
+    <h2>怎么摆手机才数得准</h2>
+    <ul>
+      <li>手机竖着<b>固定</b>放好（靠墙、支架都行），不要拿在手上。</li>
+      <li>离孩子 2–3 米，<b>头到脚整个人</b>都在画面里，脚下多留一点空间。</li>
+      <li>光线亮一点，背后别对着窗户逆光。</li>
+      <li><b>头顶上方留出半个身子高的空白</b>，背景越干净越好（白墙最好）。程序靠这块看绳子有没有转过来。</li>
+      <li>画面里只留一个人在跳。</li>
+      <li>右上角帧数低于 20 时，跳得很快可能漏数：关掉其他应用，或换后置摄像头。</li>
+    </ul>
+  </section>
+</div>
+<script type="module" src="app.js"></script>
+</body>
+</html>
